@@ -69,6 +69,7 @@
     scoreBtn:{ width:34, height:34, borderRadius:8, border:"1px solid #FFD700", background:"transparent", color:"#FFD700", fontSize:22, cursor:"pointer", fontFamily:F, lineHeight:1 },
     scoreNum:{ fontSize:46, fontWeight:800, minWidth:38, textAlign:"center", fontFamily:F },
     eventsGrid:{ display:"grid", gridTemplateColumns:"1fr 1px 1fr", borderBottom:"1px solid #0f1e5e" },
+    rivalGrid:{ display:"grid", gridTemplateColumns:"1fr 1px 1fr", borderBottom:"1px solid #0f1e5e", background:"rgba(255,75,75,.04)" },
     evDiv:{ background:"#0f1e5e" },
     evItem:{ display:"flex", flexDirection:"column", alignItems:"center", gap:2, padding:"6px 4px" },
     evLbl:{ fontSize:9, color:"#888", letterSpacing:1, textTransform:"uppercase", textAlign:"center" },
@@ -110,10 +111,12 @@
     const [minutes, setMinutes] = useState({});
     const [stintMin, setStintMin] = useState({});
     const [entryTime, setEntryTime] = useState({});
+    const [stintEntry, setStintEntry] = useState({});
     const [goalLog, setGoalLog] = useState([]);
     const [foulLog, setFoulLog] = useState([]);
     const [cardLog, setCardLog] = useState([]);
     const [rivalGoals, setRivalGoals] = useState(0);
+    const [rivalCards, setRivalCards] = useState({yel:0, red:0});
     const [modal, setModal] = useState(null);
     const [subOutId, setSubOutId] = useState(null);
     const [stintLog, setStintLog] = useState([]); // [{pid,full,enteredAt,exitedAt,half}]
@@ -123,6 +126,8 @@
     const entryRef=useRef({}); entryRef.current=entryTime;
     const minsRef=useRef({}); minsRef.current=minutes;
     const stintRef=useRef({}); stintRef.current=stintMin;
+    const stintEntryRef=useRef({}); stintEntryRef.current=stintEntry;
+
     const tlRef=useRef(HALF_SECS); tlRef.current=timeLeft;
     const stintLogRef=useRef([]); stintLogRef.current=stintLog;
     const halfRef=useRef(1); halfRef.current=half;
@@ -133,7 +138,7 @@
         try {
           const state={phase,half,rival,matchMeta,timeLeft:tlRef.current,
             onField:onFieldRef.current,minutes:minsRef.current,stintMin:stintRef.current,
-            entryTime:entryRef.current,goalLog,foulLog,cardLog,rivalGoals,stintLog};
+            entryTime:entryRef.current,goalLog,foulLog,cardLog,rivalGoals,rivalCards,stintLog};
           localStorage.setItem('bocaMatch',JSON.stringify(state));
         } catch(e){}
       };
@@ -155,7 +160,7 @@
             setTimeLeft(s.timeLeft||HALF_SECS); setOnField(s.onField||[]);
             setMinutes(s.minutes||{}); setStintMin(s.stintMin||{}); setEntryTime(s.entryTime||{});
             setGoalLog(s.goalLog||[]); setFoulLog(s.foulLog||[]);
-            setCardLog(s.cardLog||[]); setRivalGoals(s.rivalGoals||0);
+            setCardLog(s.cardLog||[]); setRivalGoals(s.rivalGoals||0); setRivalCards(s.rivalCards||{yel:0,red:0});
             setStintLog(s.stintLog||[]);
           }
         }
@@ -167,33 +172,50 @@
 
     const elapsed = tl => HALF_SECS - tl; // segundos transcurridos en el tiempo
     const fmtMatch = s => { const m=Math.floor(s/60),sc=s%60; return sc>0?`${m}'${String(sc).padStart(2,"0")}"`:m+"'"; };
-    // flush acumula en minutes Y stintMin, cierra stints abiertos, borra entryTime
+    // flush: acumula minutes y stintMin, borra entryTime - NO crea stintLog (eso solo en sub/fin)
     const flush = cur => {
       const en=entryRef.current;
       const updM={...minsRef.current}, updS={...stintRef.current};
-      const newStints=[];
       for(const id of onFieldRef.current){
         if(en[id]!==undefined){
           const delta=en[id]-cur;
           updM[id]=(updM[id]||0)+delta;
           updS[id]=(updS[id]||0)+delta;
-          // close open stints
-          const p=ROSTER.find(r=>r.id===id);
-          newStints.push({pid:id,full:p?.full||p?.s,enteredAt:elapsed(en[id]),exitedAt:elapsed(cur),half:halfRef.current});
         }
       }
       setMinutes(updM); minsRef.current=updM;
       setStintMin(updS); stintRef.current=updS;
-      setStintLog(prev=>[...prev,...newStints]);
       setEntryTime({}); entryRef.current={};
+    };
+
+    // closeStintsForAll: crea stintLog para todos los jugadores en cancha (fin de tiempo)
+    const closeStintsForAll = curTL => {
+      const se=stintEntryRef.current;
+      const cur=HALF_SECS-curTL;
+      const newStints=[];
+      for(const id of onFieldRef.current){
+        if(se[id]!==undefined){
+          const p=ROSTER.find(r=>r.id===id);
+          newStints.push({pid:id,full:p?.full||p?.s,enteredAt:se[id],exitedAt:cur,half:halfRef.current});
+        }
+      }
+      if(newStints.length) setStintLog(prev=>[...prev,...newStints]);
+      setStintEntry({}); stintEntryRef.current={};
     };
     const toggleTimer = () => {
       if(running){
         flush(timeLeft); setRunning(false);
       } else {
         const en={};
-        for(const id of onFieldRef.current) en[id]=timeLeft;
-        setEntryTime(en); entryRef.current=en; setRunning(true);
+        const se={...stintEntryRef.current};
+        for(const id of onFieldRef.current){
+          en[id]=timeLeft;
+          // Only set stintEntry if player doesn't have one yet (first time entering this stint)
+          if(se[id]===undefined) se[id]=HALF_SECS-timeLeft;
+        }
+        setEntryTime(en); entryRef.current=en;
+        setStintEntry(se); stintEntryRef.current=se;
+        setRunning(true);
       }
     };
     const editTimer = newVal => {
@@ -390,6 +412,16 @@
         txt += `  ${full}: ${detalle} | Total: ${fmtMin(totalSecs)}\n`;
       });
       const ps=getPS;
+      // Consolidate stints per player for summary
+      const fmtE = s => { if(s<=0)return"0'"; const m=Math.floor(s/60),sc=s%60; return sc>0?`${m}'${String(sc).padStart(2,"0")}"`:m+"'"; };
+      const stintsByPlayer = {};
+      stintLog.forEach(s=>{ if(!stintsByPlayer[s.pid]) stintsByPlayer[s.pid]={full:s.full,stints:[]}; stintsByPlayer[s.pid].stints.push(s); });
+      // Add open stints
+      Object.entries(stintEntry).forEach(([idStr,entAt])=>{
+        const id=parseInt(idStr); const curEl=HALF_SECS-timeLeft;
+        if(!stintsByPlayer[id]){ const p=ROSTER.find(r=>r.id===id); stintsByPlayer[id]={full:p?.full||p?.s,stints:[]}; }
+        stintsByPlayer[id].stints.push({pid:id,enteredAt:entAt,exitedAt:curEl,half,open:true});
+      });
       const snapNames = ids => ids.map(id=>{ const p=ROSTER.find(r=>r.id===id); return p?p.s:"?"; }).join(", ");
       txt += `\nGOLES BOCA (${bocaScore}):\n`;
       if(goalLog.length){ goalLog.forEach((g,i)=>{ const p=ROSTER.find(r=>r.id===g.pid); txt += `  Gol ${i+1}: ${p?p.full:"Sin asignar"}${g.snap?` | En cancha: ${snapNames(g.snap)}`:""} (${g.half===1?"1T":"2T"})\n`; }); }
@@ -397,6 +429,7 @@
       txt += `GOLES RIVAL (${rivalGoals})\n`;
       txt += `Faltas cometidas: ${tCom} | Recibidas: ${tRec}\n`;
       txt += `Amarillas: ${tYel} | Rojas: ${tRed}\n`;
+      txt += `Tarjetas RIVAL: 🟨${rivalCards.yel} 🟥${rivalCards.red}\n`;
       if(cardLog.length){
         txt += `Tarjetas:\n`;
         cardLog.forEach(c=>{ const p=ROSTER.find(r=>r.id===c.pid); txt += `  ${p?p.full:"?"} ${c.t==="yellow"?"🟨":"🟥"}${c.snap?` | En cancha: ${snapNames(c.snap)}`:""} (${c.half===1?"1T":"2T"})\n`; });
@@ -432,7 +465,7 @@
       const fmtMM = s=>{ if(s<=0)return"00:00"; const m=Math.floor(s/60),sc=s%60; return `${String(m).padStart(2,"0")}:${String(sc).padStart(2,"0")}`; };
       const payload = {
         partido: { id:partidoId, temporada:"2026", fecha:today, rival, resultado,
-          golBoca:bocaScore, golRival:rivalGoals, condicion:matchMeta.condicion,
+          golBoca:bocaScore, golRival:rivalGoals, tarjetasRivalAma:rivalCards.yel, tarjetasRivalRoj:rivalCards.red, condicion:matchMeta.condicion,
           cancha:matchMeta.cancha, tipo:matchMeta.torneo, instancia:matchMeta.instancia,
           tiempoJuego1T: fmtTime(t1secs), tiempoJuego2T: fmtTime(t2secs),
           tiempoJuegoTotal: fmtTime(t1secs+t2secs), mes, semana: sem },
@@ -456,14 +489,13 @@
         }).filter(p=>getLive(p.id)>0)
       };
       try {
-        // Content-Type: text/plain evita el CORS preflight desde file://
-        await fetch(APPS_SCRIPT_URL, {
+        const res = await fetch(APPS_SCRIPT_URL, {
           method:"POST",
-          mode:"no-cors",
           headers:{"Content-Type":"text/plain"},
           body:JSON.stringify(payload)
         });
-        setSaveMsg("✅ Enviado! Verificá la planilla en Drive.");
+        const json = await res.json();
+        setSaveMsg(json.ok ? "✅ Guardado en Drive!" : "❌ Error: "+(json.error||"desconocido"));
       } catch(e){ setSaveMsg("❌ Error: "+e.message); }
       setSaving(false);
     };
@@ -493,22 +525,29 @@
 
     const doSub = inId => {
       const en={...entryRef.current}, updM={...minsRef.current}, updS={...stintRef.current}, cur=tlRef.current;
-      const newStints=[];
+      const se={...stintEntryRef.current};
+      const curElapsed=HALF_SECS-cur;
+      // Close stint for outgoing player
       if(running&&en[subOutId]!==undefined){
         const delta=en[subOutId]-cur;
         updM[subOutId]=(updM[subOutId]||0)+delta;
-        const pOut=ROSTER.find(r=>r.id===subOutId);
-        newStints.push({pid:subOutId,full:pOut?.full||pOut?.s,enteredAt:elapsed(en[subOutId]),exitedAt:elapsed(cur),half:halfRef.current});
         delete en[subOutId];
       }
+      if(se[subOutId]!==undefined){
+        const pOut=ROSTER.find(r=>r.id===subOutId);
+        setStintLog(prev=>[...prev,{pid:subOutId,full:pOut?.full||pOut?.s,enteredAt:se[subOutId],exitedAt:curElapsed,half:halfRef.current}]);
+        delete se[subOutId];
+      }
+      // Open stint for incoming player
       updS[inId]=0;
       if(running){ en[inId]=cur; }
+      se[inId]=curElapsed; // record entry elapsed for new player
       const nf=onField.map(id=>id===subOutId?inId:id);
       setOnField(nf); onFieldRef.current=nf;
       setMinutes(updM); minsRef.current=updM;
       setStintMin(updS); stintRef.current=updS;
       setEntryTime(en); entryRef.current=en;
-      if(newStints.length) setStintLog(prev=>[...prev,...newStints]);
+      setStintEntry(se); stintEntryRef.current=se;
       setSubOutId(null);
     };
     const addCard = (id,type) => {
@@ -532,12 +571,12 @@
     const removeFoul=t=>setFoulLog(p=>{const i=[...p].reverse().findIndex(f=>f.t===t);if(i<0)return p;return p.filter((_,j)=>j!==p.length-1-i);});
     const removeCard=t=>setCardLog(p=>{const i=[...p].reverse().findIndex(c=>c.t===t);if(i<0)return p;return p.filter((_,j)=>j!==p.length-1-i);});
 
-    const startSecondHalf=()=>{setHalf(2);setTimeLeft(HALF_SECS);setRunning(false);setEntryTime({});setStintMin({});setSubOutId(null);setModal(null);halfRef.current=2;setPhase("setup2");};
+    const startSecondHalf=()=>{setHalf(2);setTimeLeft(HALF_SECS);setRunning(false);setEntryTime({});setStintMin({});setStintEntry({});setSubOutId(null);setModal(null);halfRef.current=2;setPhase("setup2");};
     const resetAll=()=>{
       if(!window.confirm("¿Reiniciar partido?"))return;
       setPhase("setup");setHalf(1);setTimeLeft(HALF_SECS);setRunning(false);
       setOnField([]);setMinutes({});setStintMin({});setEntryTime({});setSubOutId(null);setModal(null);
-      setGoalLog([]);setFoulLog([]);setCardLog([]);setRivalGoals(0);setRival("Rival");setMatchMeta({torneo:"Regular",instancia:"",condicion:"Local",cancha:""});setSaveMsg("");setStintLog([]);try{localStorage.removeItem('bocaMatch');}catch(e){}
+      setGoalLog([]);setFoulLog([]);setCardLog([]);setRivalGoals(0);setRivalCards({yel:0,red:0});setRival("Rival");setMatchMeta({torneo:"Regular",instancia:"",condicion:"Local",cancha:""});setSaveMsg("");setStintLog([]);setStintEntry({});try{localStorage.removeItem('bocaMatch');}catch(e){}
     };
 
     const expelled=[...new Set(cardLog.filter(c=>c.t==='red').map(c=>c.pid))];
@@ -545,13 +584,14 @@
 
     if(phase==="setup"||phase==="setup2")
       return <Setup half={phase==="setup2"?2:1} current={onField} rival={rival} matchMeta={matchMeta}
-        onMetaChange={setMatchMeta} onRivalChange={setRival} onStart={ids=>{setOnField(ids);onFieldRef.current=ids;setPhase("match");}}/>;
+        onMetaChange={setMatchMeta} onRivalChange={setRival} onStart={ids=>{setOnField(ids);onFieldRef.current=ids;const se={};ids.forEach(id=>se[id]=HALF_SECS-timeLeft);setStintEntry(se);stintEntryRef.current=se;setPhase("match");}}/>;
 
     if(phase==="halftime") return (
       <div style={C.overlay}><div style={C.modal}>
         <div style={C.badge}>⏸ FIN 1er TIEMPO</div>
         <div style={C.modalScore}>BOCA {bocaScore} — {rivalGoals}<br/><span style={{fontSize:13,color:"#aaa"}}>{rivalName}</span></div>
         <p style={{color:"#888",fontSize:12}}>Cometidas {tComTotal} · Recibidas {tRecTotal} · 🟨{tYelTotal} 🟥{tRedTotal}</p>
+          <p style={{color:"#FF4B4B",fontSize:11}}>Rival: 🟨{rivalCards.yel} 🟥{rivalCards.red}</p>
         <button style={{...C.btnPrimary,width:"100%"}} onClick={startSecondHalf}>▶ Iniciar 2do Tiempo</button>
         <button style={{...C.btnGhost,width:"100%",background:saving?"#333":undefined}} onClick={guardarEnDrive} disabled={saving}>{saving?"Guardando...":"💾 Guardar 1er Tiempo en Drive"}</button>
         <button style={{...C.btnGhost,width:"100%"}} onClick={()=>generarPDF('1er Tiempo')}>📄 Bajar PDF 1er Tiempo</button>
@@ -658,6 +698,30 @@
               <button style={C.evBtn} onClick={()=>removeCard('red')}>−</button>
               <span style={C.evNum}>{tRed}</span>
               <button style={C.evBtn} onClick={()=>setModal({type:'pick',title:"🟥 ¿A quién le dieron roja?",onPick:id=>addCard(id,'red'),onSkip:()=>addCard(null,'red')})}>+</button>
+            </div>
+          </div>
+        </div>
+
+        {/* Tarjetas del rival */}
+        <div style={{fontSize:9,color:"#FF4B4B",padding:"5px 16px 2px",fontWeight:700,letterSpacing:2,textTransform:"uppercase",background:"rgba(255,75,75,.04)"}}>
+          TARJETAS RIVAL
+        </div>
+        <div style={C.rivalGrid}>
+          <div style={C.evItem}>
+            <span style={{...C.evLbl,color:"#f9a825"}}>🟨 Amarillas rival</span>
+            <div style={C.evCtrl}>
+              <button style={C.evBtn} onClick={()=>setRivalCards(c=>({...c,yel:Math.max(0,c.yel-1)}))}>−</button>
+              <span style={{...C.evNum,color:"#f9a825"}}>{rivalCards.yel}</span>
+              <button style={C.evBtn} onClick={()=>setRivalCards(c=>({...c,yel:c.yel+1}))}>+</button>
+            </div>
+          </div>
+          <div style={C.evDiv}/>
+          <div style={C.evItem}>
+            <span style={{...C.evLbl,color:"#FF4B4B"}}>🟥 Rojas rival</span>
+            <div style={C.evCtrl}>
+              <button style={C.evBtn} onClick={()=>setRivalCards(c=>({...c,red:Math.max(0,c.red-1)}))}>−</button>
+              <span style={{...C.evNum,color:"#FF4B4B"}}>{rivalCards.red}</span>
+              <button style={C.evBtn} onClick={()=>setRivalCards(c=>({...c,red:c.red+1}))}>+</button>
             </div>
           </div>
         </div>
